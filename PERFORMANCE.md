@@ -1,44 +1,32 @@
-# LatestDirs: Performance Optimization & Benchmarking Plan
+## Current Status (v1.0.4+)
 
-Goal: Achieve and exceed the scanning performance of tools like `ripgrep` and `Agent Ransack` for recursive directory recency checks.
+### Benchmarks (100k Files)
+- **Normal Scan**: ~49ms (approx. 2M files/sec)
+- **Git Scan**: ~17ms
+- **Startup (Native AOT)**: ~800ms (end-to-end for --help)
 
-## Phase 1: Research (Current)
-
-### 1.1 IO Strategy
-- **IO Ring (.NET 10)**: Investigate using the new `System.IO.Pipelines` or direct `io_uring` wrappers on Linux for high-concurrency, zero-copy I/O.
-- **Direct Syscalls**: For Windows, explore bypassing `FileSystemEnumerable` for direct `GetQueuedCompletionStatus` or `ReadDirectoryChangesW` if managed overhead remains a bottleneck.
-
-### 1.2 Processing & Memory
-- **SIMD Metadata Parsing**: Use Vectorized instructions (`Vector<T>`) to compare timestamps across blocks of files.
-- **Lock-Free Aggregation**: Replace `lock(results)` with `ConcurrentStack` or `System.Threading.Channels` to eliminate lock contention during high-speed parallel scans.
-- **Zero-String Scanning**: Attempt to scan and compare timestamps using `ReadOnlySpan<byte>` or `ReadOnlySpan<char>` directly from the buffer, avoiding `string` allocations for every filename.
-
-## Phase 2: Benchmarking Suite
-
-### 2.1 Baseline Comparison
-Tools to benchmark against:
-- `LatestDirs` (Current)
-- `ripgrep` (`rg --files --sort mtime`)
-- `find` / `ls -lt` (Linux)
-- `Get-ChildItem` (PowerShell)
-
-### 2.2 Workload Scenarios
-- **Shallow & Wide**: Root directory with 10,000 subdirectories.
-- **Deep & Narrow**: Single path with 100 levels of depth.
-- **Real World**: `C:\` or `/home/user` with mixed content (source code, media, system files).
-- **Network Share**: High latency, high throughput scenario.
-
-## Phase 3: Optimizations
-
-### 3.1 Parallelism Tuning
-- **Work-Stealing Scheduler**: Custom TaskScheduler to optimize for I/O-bound workloads.
-- **Adaptive Concurrency**: Dynamically adjust the number of parallel workers based on disk type (SSD vs. HDD) and I/O wait times.
-
-### 3.2 Pre-Filtering
-- **Metadata Cache**: Optional local cache for extremely large drives, using filesystem journals (USN Journal on NTFS) to only scan changed blocks.
+### Optimizations Applied
+- **Lock-Free Channels**: `System.Threading.Channels` for result aggregation.
+- **SIMD-Ready Loops**: Buffer-based `Span<long>` processing for JIT auto-vectorization.
+- **Native AOT**: Compiled to standalone native binary for Windows x64.
 
 ---
 
-## Verification Plan
-- Use `BenchmarkDotNet` for micro-benchmarks of `GetLatestChange`.
-- Use `hyperfine` for end-to-end CLI performance comparison against `ripgrep`.
+## Phase 4: "Ultra" Mode (Windows Only)
+
+To exceed ripgrep's metadata performance on Windows, we are implementing "Ultra" mode using the **NTFS USN Journal**.
+
+### USN Journal Strategy
+1. **Direct Access**: Use `DeviceIoControl` to read the journal directly from the disk volume.
+2. **Instant Change Detection**: Instead of walking the directory tree, we query the journal for all changes since a specific timestamp.
+3. **MFT Caching**: 
+   - USN records only provide Parent IDs.
+   - We will pre-load the **Master File Table (MFT)** using `FSCTL_ENUM_USN_DATA` into a high-performance memory map (e.g., `FrozenDictionary<ulong, ulong>`).
+   - This allows resolving the full path for any changed file in O(depth) time using in-memory lookups.
+
+### Target Performance
+- **Volume Scan**: < 100ms for entire `C:\` drive (regardless of file count).
+- **Recency Filter**: Constant time O(changes) rather than O(total files).
+
+## Phase 5: I/O Ring (Linux)
+- Researching `io_uring` integration via `System.IO.Pipelines` or direct P/Invoke for high-concurrency metadata retrieval on Linux.

@@ -11,11 +11,25 @@
     <Authors>James</Authors>
     <Description>A tool to rapidly find recently changed directories.</Description>
     <Version>1.0.0</Version>
+    <PublishAot>true</PublishAot>
+    <OptimizationPreference>Speed</OptimizationPreference>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Spectre.Console" Version="0.55.2" />
     <PackageReference Include="System.CommandLine" Version="2.0.0-beta4.22272.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Remove="Core\**" />
+    <Compile Remove="Benchmarks\**" />
+    <EmbeddedResource Remove="Core\**" />
+    <EmbeddedResource Remove="Benchmarks\**" />
+    <None Remove="Core\**" />
+    <None Remove="Benchmarks\**" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="Core\LatestDirs.Core.csproj" />
   </ItemGroup>
 
 </Project>
