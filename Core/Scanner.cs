@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.IO.Enumeration;
 using System.Linq;
+using System.Threading.Channels;
 using System.Threading.Tasks;
 
 namespace LatestDirs;
@@ -17,8 +18,10 @@ public static class Scanner
     {
         var results = new List<ScanResult>();
         var topLevelDirs = Directory.GetDirectories(rootPath);
-
-        await Parallel.ForEachAsync(topLevelDirs, async (dir, ct) =>
+        
+        var channel = Channel.CreateUnbounded<ScanResult>();
+        
+        var producerTask = Parallel.ForEachAsync(topLevelDirs, async (dir, ct) =>
         {
             if (ExcludedFolders.Any(e => dir.EndsWith(Path.DirectorySeparatorChar + e) || dir.EndsWith(Path.AltDirectorySeparatorChar + e)))
                 return;
@@ -28,15 +31,22 @@ public static class Scanner
                 var gitResult = await ScanGitRepo(dir);
                 if (gitResult != null)
                 {
-                    lock (results) results.Add(gitResult);
+                    await channel.Writer.WriteAsync(gitResult);
                 }
             }
             else
             {
                 var latestChange = GetLatestChange(dir, maxDepth);
-                lock (results) results.Add(new ScanResult(dir, latestChange));
+                await channel.Writer.WriteAsync(new ScanResult(dir, latestChange));
             }
         });
+
+        _ = producerTask.ContinueWith(_ => channel.Writer.Complete());
+
+        await foreach (var result in channel.Reader.ReadAllAsync())
+        {
+            results.Add(result);
+        }
 
         return results.OrderByDescending(r => r.LastChange).ToList();
     }
@@ -58,37 +68,65 @@ public static class Scanner
             MaxRecursionDepth = maxDepth,
             IgnoreInaccessible = true,
             AttributesToSkip = FileAttributes.System | FileAttributes.Hidden | FileAttributes.ReparsePoint,
-            ReturnSpecialDirectories = false
+            ReturnSpecialDirectories = false,
+            BufferSize = 65536 // Increased for performance
         };
 
-        var latest = DateTime.MinValue;
+        var latestTicks = DateTime.MinValue.Ticks;
 
         try
         {
-            var enumerable = new FileSystemEnumerable<DateTime>(
+            var enumerable = new FileSystemEnumerable<long>(
                 path,
-                (ref FileSystemEntry entry) => entry.LastWriteTimeUtc.UtcDateTime,
+                (ref FileSystemEntry entry) => entry.LastWriteTimeUtc.Ticks,
                 options)
             {
                 ShouldIncludePredicate = (ref FileSystemEntry entry) => true
             };
 
-            foreach (var time in enumerable)
+            // Process in chunks to help JIT auto-vectorize
+            const int bufferSize = 256;
+            var buffer = new long[bufferSize];
+            int count = 0;
+
+            foreach (var ticks in enumerable)
             {
-                if (time > latest) latest = time;
+                buffer[count++] = ticks;
+                if (count == bufferSize)
+                {
+                    latestTicks = Math.Max(latestTicks, GetMax(buffer.AsSpan()));
+                    count = 0;
+                }
+            }
+
+            if (count > 0)
+            {
+                latestTicks = Math.Max(latestTicks, GetMax(buffer.AsSpan(0, count)));
             }
         }
         catch (Exception)
         {
-            // Log or ignore specific access issues
+            // Ignore access issues
         }
 
-        if (latest == DateTime.MinValue)
+        if (latestTicks == DateTime.MinValue.Ticks)
         {
-            try { latest = Directory.GetLastWriteTimeUtc(path); }
-            catch { latest = DateTime.MinValue; }
+            try { latestTicks = Directory.GetLastWriteTimeUtc(path).Ticks; }
+            catch { }
         }
 
-        return new DateTimeOffset(latest, TimeSpan.Zero);
+        return new DateTimeOffset(latestTicks, TimeSpan.Zero);
+    }
+
+    private static long GetMax(ReadOnlySpan<long> values)
+    {
+        if (values.IsEmpty) return DateTime.MinValue.Ticks;
+        long max = values[0];
+        // .NET 10 JIT will likely vectorize this simple loop
+        for (int i = 1; i < values.Length; i++)
+        {
+            if (values[i] > max) max = values[i];
+        }
+        return max;
     }
 }
